@@ -23,8 +23,6 @@ const usage =
     \\
 ;
 
-var log_tty_config: std.io.tty.Config = undefined; // Will be initialized immediately in main
-
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .Debug) log.Level.debug else log.Level.info,
     .logFn = logImpl,
@@ -32,7 +30,7 @@ pub const std_options: std.Options = .{
 
 pub fn logImpl(
     comptime level: log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -41,27 +39,32 @@ pub fn logImpl(
     else
         comptime level.asText() ++ "(" ++ @tagName(scope) ++ "): ";
     var buffer: [64]u8 = undefined;
-    const stderr = std.debug.lockStderrWriter(&buffer);
-    defer std.debug.unlockStderrWriter();
-    log_tty_config.setColor(stderr, switch (level) {
+    const stderr = std.debug.lockStderr(&buffer);
+    defer std.debug.unlockStderr();
+
+    const terminal = stderr.terminal();
+    terminal.setColor(switch (level) {
         .err => .bright_red,
         .warn => .bright_yellow,
         .info => .bright_blue,
         .debug => .bright_magenta,
     }) catch return;
-    stderr.writeAll(prefix) catch return;
-    log_tty_config.setColor(stderr, .reset) catch return;
-    stderr.print(format ++ "\n", args) catch return;
+
+    const writer = &stderr.file_writer.interface;
+    writer.writeAll(prefix) catch return;
+    terminal.setColor(.reset) catch return;
+    writer.print(format ++ "\n", args) catch return;
 }
 
-pub fn main() Allocator.Error!void {
-    log_tty_config = std.io.tty.detectConfig(.stderr());
+pub fn logInit(io: std.Io, NO_COLOR: bool, CLICOLOR_FORCE: bool) std.Io.Cancelable!void {
+    const stderr = std.debug.lockStderr(&.{});
+    stderr.mode = try .detect(io, NO_COLOR, CLICOLOR_FORCE);
+    std.debug.unlockStderr();
+}
 
-    const allocator = std.heap.smp_allocator;
-
-    var cli_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer cli_arena_state.deinit();
-    const cli_arena = cli_arena_state.allocator();
+pub fn main(init: std.process.Init) Allocator.Error!void {
+    const allocator = init.arena.allocator();
+    const io = init.io;
 
     var gir_dir_paths: std.ArrayList([]u8) = .empty;
     var gir_fixes_dir_paths: std.ArrayList([]u8) = .empty;
@@ -72,42 +75,42 @@ pub fn main() Allocator.Error!void {
     var maybe_dependency_file_path: ?[]u8 = null;
     var roots: std.ArrayList(gir.Include) = .empty;
 
-    var args: ArgIterator = .{ .args = try std.process.argsWithAllocator(cli_arena) };
+    var args: ArgIterator = .{ .args = try init.minimal.args.iterateAllocator(allocator) };
     _ = args.next();
     while (args.next()) |arg| {
         switch (arg) {
             .option => |option| if (option.is('h', "help")) {
-                std.fs.File.stdout().writeAll(usage) catch {};
+                std.Io.File.stdout().writeStreamingAll(io, usage) catch {};
                 std.process.exit(0);
             } else if (option.is(null, "bindings-dir")) {
                 const path = args.optionValue() orelse fatal("expected value for --bindings-dir", .{});
-                try bindings_dir_paths.append(cli_arena, try cli_arena.dupe(u8, path));
+                try bindings_dir_paths.append(allocator, try allocator.dupe(u8, path));
             } else if (option.is(null, "extensions-dir")) {
                 const path = args.optionValue() orelse fatal("expected value for --extensions-dir", .{});
-                try extensions_dir_paths.append(cli_arena, try cli_arena.dupe(u8, path));
+                try extensions_dir_paths.append(allocator, try allocator.dupe(u8, path));
             } else if (option.is(null, "gir-dir")) {
                 const path = args.optionValue() orelse fatal("expected value for --gir-dir", .{});
-                try gir_dir_paths.append(cli_arena, try cli_arena.dupe(u8, path));
+                try gir_dir_paths.append(allocator, try allocator.dupe(u8, path));
             } else if (option.is(null, "gir-fixes-dir")) {
                 const path = args.optionValue() orelse fatal("expected value for --gir-fixes-dir", .{});
-                try gir_fixes_dir_paths.append(cli_arena, try cli_arena.dupe(u8, path));
+                try gir_fixes_dir_paths.append(allocator, try allocator.dupe(u8, path));
             } else if (option.is(null, "output-dir")) {
                 const path = args.optionValue() orelse fatal("expected value for --output-dir", .{});
-                maybe_output_dir_path = try cli_arena.dupe(u8, path);
+                maybe_output_dir_path = try allocator.dupe(u8, path);
             } else if (option.is(null, "abi-test-output-dir")) {
                 const path = args.optionValue() orelse fatal("expected value for --abi-test-output-dir", .{});
-                maybe_abi_test_output_dir_path = try cli_arena.dupe(u8, path);
+                maybe_abi_test_output_dir_path = try allocator.dupe(u8, path);
             } else if (option.is(null, "dependency-file")) {
                 const path = args.optionValue() orelse fatal("expected value for --dependency-file", .{});
-                maybe_dependency_file_path = try cli_arena.dupe(u8, path);
+                maybe_dependency_file_path = try allocator.dupe(u8, path);
             } else {
                 fatal("unrecognized option: {f}", .{option});
             },
             .param => |param| {
                 const sep_pos = mem.indexOfScalar(u8, param, '-') orelse fatal("invalid GIR repository name: {s}", .{param});
-                try roots.append(cli_arena, .{
-                    .name = try cli_arena.dupe(u8, param[0..sep_pos]),
-                    .version = try cli_arena.dupe(u8, param[sep_pos + 1 ..]),
+                try roots.append(allocator, .{
+                    .name = try allocator.dupe(u8, param[0..sep_pos]),
+                    .version = try allocator.dupe(u8, param[sep_pos + 1 ..]),
                 });
             },
             .unexpected_value => |unexpected_value| fatal("unexpected value to --{s}: {s}", .{
@@ -125,6 +128,7 @@ pub fn main() Allocator.Error!void {
         defer diag.deinit();
         const repositories = try gir.findRepositories(
             allocator,
+            io,
             gir_dir_paths.items,
             gir_fixes_dir_paths.items,
             roots.items,
@@ -144,6 +148,7 @@ pub fn main() Allocator.Error!void {
         defer diag.deinit();
         try translate.createBuildFiles(
             allocator,
+            io,
             repositories,
             output_dir_path,
             &deps,
@@ -153,11 +158,12 @@ pub fn main() Allocator.Error!void {
     }
 
     {
-        const src_output_dir_path = try std.fs.path.join(cli_arena, &.{ output_dir_path, "src" });
+        const src_output_dir_path = try std.fs.path.join(allocator, &.{ output_dir_path, "src" });
         var diag: Diagnostics = .{ .allocator = allocator };
         defer diag.deinit();
         try translate.createBindings(
             allocator,
+            io,
             repositories,
             bindings_dir_paths.items,
             extensions_dir_paths.items,
@@ -173,6 +179,7 @@ pub fn main() Allocator.Error!void {
         defer diag.deinit();
         try translate.createAbiTests(
             allocator,
+            io,
             repositories,
             abi_test_output_dir_path,
             &deps,
@@ -184,7 +191,7 @@ pub fn main() Allocator.Error!void {
     if (maybe_dependency_file_path) |dependency_file_path| {
         var diag: Diagnostics = .{ .allocator = allocator };
         defer diag.deinit();
-        try writeDependencies(dependency_file_path, deps, &diag);
+        try writeDependencies(io, dependency_file_path, deps, &diag);
         diag.report("failed to create dependency file", .{});
     }
 }
@@ -194,13 +201,13 @@ fn fatal(comptime format: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
-fn writeDependencies(path: []const u8, deps: Dependencies, diag: *Diagnostics) !void {
-    var file = std.fs.cwd().createFile(path, .{}) catch |err|
+fn writeDependencies(io: std.Io, path: []const u8, deps: Dependencies, diag: *Diagnostics) !void {
+    var file = std.Io.Dir.cwd().createFile(io, path, .{}) catch |err|
         return diag.add("failed to create dependency file {s}: {}", .{ path, err });
-    defer file.close();
+    defer file.close(io);
 
     var buf: [4096]u8 = undefined;
-    var file_writer = file.writer(&buf);
+    var file_writer = file.writer(io, &buf);
     deps.write(&file_writer.interface) catch |err|
         return diag.add("failed to write dependency file {s}: {}", .{ path, err });
     file_writer.interface.flush() catch |err|
@@ -278,7 +285,8 @@ pub const Diagnostics = struct {
 
 // Inspired by https://github.com/judofyr/parg
 const ArgIterator = struct {
-    args: std.process.ArgIterator,
+    args: std.process.Args.Iterator,
+
     state: union(enum) {
         normal,
         short: []const u8,

@@ -542,10 +542,7 @@ test defineFlags {
         two: i1 = -1,
         _padding0: u2 = 0,
         three: u1 = 1,
-        _padding1: @Type(.{ .int = .{
-            .signedness = .unsigned,
-            .bits = @bitSizeOf(c_uint) - 5,
-        } }) = 0,
+        _padding1: @Int(.unsigned, @bitSizeOf(c_uint) - 5) = 0,
 
         pub const getGObjectType = gobject.ext.defineFlags(@This(), .{});
     };
@@ -1437,21 +1434,12 @@ pub fn registerProperties(class: anytype, properties: []const type) void {
 }
 
 pub fn SignalHandler(comptime Itype: type, comptime param_types: []const type, comptime DataType: type, comptime ReturnType: type) type {
-    return *const @Type(.{ .@"fn" = .{
-        .calling_convention = .c,
-        .is_generic = false,
-        .is_var_args = false,
-        .return_type = ReturnType,
-        .params = params: {
-            var params: [param_types.len + 2]std.builtin.Type.Fn.Param = undefined;
-            params[0] = .{ .is_generic = false, .is_noalias = false, .type = *Itype };
-            for (param_types, params[1 .. params.len - 1]) |ParamType, *type_param| {
-                type_param.* = .{ .is_generic = false, .is_noalias = false, .type = ParamType };
-            }
-            params[params.len - 1] = .{ .is_generic = false, .is_noalias = false, .type = DataType };
-            break :params &params;
-        },
-    } });
+    return *const @Fn(
+        .{*Itype} ++ param_types ++ .{DataType},
+        [param_types.len + 2]std.builtin.Type.Fn.Param.Attributes{},
+        ReturnType,
+        .{ .@"callconv" = .c },
+    );
 }
 
 pub const RegisterSignalOptions = struct {
@@ -1478,25 +1466,6 @@ pub fn defineSignal(
     comptime param_types: []const type,
     comptime ReturnType: type,
 ) type {
-    const EmitParams = @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = fields: {
-            var fields: [param_types.len]std.builtin.Type.StructField = undefined;
-            for (param_types, &fields, 0..) |ParamType, *field, i| {
-                field.* = .{
-                    .name = std.fmt.comptimePrint("{}", .{i}),
-                    .type = ParamType,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(ParamType),
-                };
-            }
-            break :fields &fields;
-        },
-        .decls = &.{},
-        .is_tuple = true,
-    } });
-
     return struct {
         /// The ID of the signal. Initialized once the signal is registered.
         pub var id: c_uint = undefined;
@@ -1525,7 +1494,7 @@ pub fn defineSignal(
         }
 
         /// Emits the signal on an instance.
-        pub fn emit(target: *Itype, detail: ?[:0]const u8, params: EmitParams, return_value: ?*ReturnType) void {
+        pub fn emit(target: *Itype, detail: ?[:0]const u8, params: @Tuple(param_types), return_value: ?*ReturnType) void {
             var emit_params: [param_types.len + 1]gobject.Value = undefined;
             emit_params[0] = gobject.ext.Value.newFrom(target);
             inline for (params, emit_params[1..]) |param, *emit_param| {
@@ -2190,10 +2159,7 @@ const test_types = struct {
         one: bool = false,
         two: bool = false,
         three: bool = false,
-        _padding1: @Type(.{ .int = .{
-            .signedness = .unsigned,
-            .bits = @bitSizeOf(c_uint) - 3,
-        } }) = 0,
+        _padding1: @Int(.unsigned, @bitSizeOf(c_uint) - 3) = 0,
 
         pub const getGObjectType = gobject.ext.defineFlags(@This(), .{});
     };
